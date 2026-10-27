@@ -13,7 +13,7 @@ no command line.
 - **Multi-language support**: TypeScript/JavaScript, Python, Go, Rust
 - **Symbol extraction**: functions, methods, classes, interfaces, types, structs, variables
 - **Import resolution**: turns module specifiers into real file-to-file relations
-- **Two views**: an interactive relation graph and a structural block diagram
+- **Two views**: an interactive relation graph and a per-function control-flow flowchart
 - **Scoping**: select files, expand by 1-3 relations, jump from entry points
 - **Graph view**: directory clusters, language-coloured boxes, symbol rows, pan/zoom/drag, filtering, click to inspect
 - **Explicit ignore handling**: honours `.gitignore`, `.ignore` and `.git/info/exclude`, and reports every skipped file with its reason
@@ -86,15 +86,21 @@ Two tabs share the same selection:
 
 - Each **box** is a file, grouped into directory clusters
 - The **coloured header** is the file's language
-- **Rows inside a box** are the file's symbols (kind tag + name); long files show the first 12 with a `+N more` row
-- **Lines between boxes** are resolved import relations; the arrow points at the imported file
+- **Rows inside a box** are the file's symbols: kind tag, name, signature (`(id: number) -> string`) and line number, like a schema's column list
+- **Lines between boxes** are resolved import relations; solid for static imports, **dashed for dynamic and type-only imports**
 - **Relations are drawn at every zoom level.** Zoomed out they are straight lines; zoomed in they become routed with arrowheads and labels
 
-**Block diagram** — a document-style structural view:
+**Block diagram** — a real control-flow flowchart for one function:
 
-- One **card per file**, with classes/structs and their methods **nested inside**
-- Import arrows between cards
-- Better than the graph when you want to read what is inside a few files
+- Built from the syntax tree, not guessed from names
+- `Start` / `End`, action blocks, **diamond decisions**, loop blocks, `return`, `throw`, `try`/`catch`
+- Branches are **labelled** (`yes` / `no`, case patterns, `loop`, `break`)
+- Loops close with a **back edge** drawn on the right
+- Pick any function from the left panel; **click a block to read its source** in the right panel
+- The whole diagram sits in a container titled with the function name
+
+Supported today: TypeScript/JavaScript and Python in full (if/else, loops, break/continue, switch/match,
+try/catch, return/throw); Rust and Go use the same constructs where their grammars expose them.
 
 ### Scope
 

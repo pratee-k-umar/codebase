@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use codebase_intel_core::resolve::normalize;
-use codebase_intel_core::{AnalysisResult, FileDepKind, Language, SymbolKind};
+use codebase_intel_core::{AnalysisResult, FileDepKind, Language, Symbol, SymbolKind};
 use egui::{
     Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2,
 };
 
-pub const NODE_WIDTH: f32 = 264.0;
+pub const NODE_WIDTH: f32 = 300.0;
 pub const HEADER_HEIGHT: f32 = 24.0;
 pub const ROW_HEIGHT: f32 = 17.0;
 pub const NODE_PADDING: f32 = 6.0;
@@ -40,6 +40,8 @@ pub struct SymbolRow {
     pub name: String,
     pub kind: SymbolKind,
     pub line: usize,
+    /// Signature or type, shown after the name like a column definition.
+    pub detail: String,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +146,7 @@ impl Graph {
                 name: symbol.name.clone(),
                 kind: symbol.kind,
                 line: symbol.span.start.line,
+                detail: signature_detail(symbol),
             });
         }
 
@@ -350,6 +353,37 @@ fn describe_directory(path: &Path) -> String {
     } else {
         label
     }
+}
+
+/// A compact rendition of a symbol's signature, like a column type in a schema
+/// diagram. Empty when there is nothing useful to show.
+fn signature_detail(symbol: &Symbol) -> String {
+    let Some(signature) = &symbol.signature else {
+        return String::new();
+    };
+
+    let params: Vec<String> = signature
+        .parameters
+        .iter()
+        .take(3)
+        .map(|parameter| match &parameter.type_ref {
+            Some(type_ref) => format!("{}: {}", parameter.name, type_ref.name),
+            None => parameter.name.clone(),
+        })
+        .collect();
+
+    let mut parts = params;
+    if signature.parameters.len() > 3 {
+        parts.push("...".to_string());
+    }
+
+    let returns = signature
+        .return_type
+        .as_ref()
+        .map(|type_ref| format!(" -> {}", type_ref.name))
+        .unwrap_or_default();
+
+    format!("({}){}", parts.join(", "), returns)
 }
 
 fn is_conventional_entry(file_name: &str) -> bool {
@@ -590,6 +624,7 @@ impl GraphView {
         let canvas = response.rect;
         self.last_canvas = canvas;
         painter.rect_filled(canvas, 0.0, BACKGROUND);
+        paint_grid(&painter, canvas, self.pan, self.zoom);
 
         if self.fit_requested {
             if let Some(id) = self.initial_focus.take() {
@@ -799,7 +834,16 @@ impl GraphView {
                 vec![start, end]
             };
 
-            painter.add(Shape::line(points, Stroke::new(width, color)));
+            let stroke = Stroke::new(width, color);
+            match edge.kind {
+                FileDepKind::DynamicImport | FileDepKind::TypeOnly => {
+                    let shapes = Shape::dashed_line(&points, stroke, 6.0, 4.0);
+                    painter.extend(shapes);
+                }
+                _ => {
+                    painter.add(Shape::line(points, stroke));
+                }
+            }
             if detailed || highlighted {
                 paint_arrowhead(painter, end, end.x >= start.x, color, width);
             }
@@ -903,10 +947,29 @@ impl GraphView {
                 painter.text(
                     Pos2::new(rect.left() + 30.0, y + ROW_HEIGHT * self.zoom / 2.0),
                     Align2::LEFT_CENTER,
-                    truncate(&row.name, row_capacity(rect.width())),
+                    truncate(&row.name, name_capacity(rect.width())),
                     font.clone(),
                     TEXT.gamma_multiply(alpha),
                 );
+
+                if !row.detail.is_empty() {
+                    painter.text(
+                        Pos2::new(rect.left() + 30.0 + 118.0 * self.zoom, y + ROW_HEIGHT * self.zoom / 2.0),
+                        Align2::LEFT_CENTER,
+                        truncate(&row.detail, detail_capacity(rect.width())),
+                        FontId::monospace((9.5 * self.zoom).clamp(6.0, 10.5)),
+                        TEXT_MUTED.gamma_multiply(alpha),
+                    );
+                }
+
+                painter.text(
+                    Pos2::new(rect.right() - 8.0, y + ROW_HEIGHT * self.zoom / 2.0),
+                    Align2::RIGHT_CENTER,
+                    format!("{}", row.line),
+                    FontId::proportional((9.0 * self.zoom).clamp(6.0, 10.0)),
+                    TEXT_MUTED.gamma_multiply(alpha),
+                );
+
                 y += ROW_HEIGHT * self.zoom;
             }
 
@@ -920,6 +983,28 @@ impl GraphView {
                 );
             }
         }
+    }
+}
+
+/// Faint dot grid so movement and scale are readable while panning.
+fn paint_grid(painter: &egui::Painter, canvas: Rect, pan: Vec2, zoom: f32) {
+    let spacing = 46.0 * zoom.clamp(0.35, 2.0);
+    if spacing < 12.0 {
+        return;
+    }
+
+    let color = Color32::from_rgb(28, 31, 38);
+    let start_x = canvas.left() + pan.x.rem_euclid(spacing);
+    let start_y = canvas.top() + pan.y.rem_euclid(spacing);
+
+    let mut x = start_x;
+    while x < canvas.right() {
+        let mut y = start_y;
+        while y < canvas.bottom() {
+            painter.circle_filled(Pos2::new(x, y), 0.9, color);
+            y += spacing;
+        }
+        x += spacing;
     }
 }
 
@@ -948,8 +1033,13 @@ fn title_capacity(pixel_width: f32) -> usize {
     ((pixel_width - 16.0) / 6.6).max(4.0) as usize
 }
 
-fn row_capacity(pixel_width: f32) -> usize {
-    ((pixel_width - 38.0) / 5.8).max(4.0) as usize
+
+fn name_capacity(pixel_width: f32) -> usize {
+    ((pixel_width * 0.42) / 5.6).max(6.0) as usize
+}
+
+fn detail_capacity(pixel_width: f32) -> usize {
+    ((pixel_width * 0.44) / 5.2).max(6.0) as usize
 }
 
 fn truncate(text: &str, capacity: usize) -> String {
@@ -1142,6 +1232,8 @@ mod tests {
         assert!(screen.x.is_finite() && screen.y.is_finite());
     }
 }
+
+
 
 
 

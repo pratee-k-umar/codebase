@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod parser;
 pub mod parsers;
 pub mod resolve;
+pub mod cfg;
 pub mod graph;
 pub mod analyzer;
 pub mod export;
@@ -45,3 +46,4 @@ pub struct ParsedFile {
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
 }
+

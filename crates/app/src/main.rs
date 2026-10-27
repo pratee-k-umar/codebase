@@ -7,7 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod block;
+mod flow;
 mod graph;
 mod repo;
 mod scan;
@@ -144,4 +144,5 @@ fn draw_line(rgba: &mut [u8], from: (f32, f32), to: (f32, f32), color: (u8, u8, 
         draw_disc(rgba, x, y, 1.6, color);
     }
 }
+
 

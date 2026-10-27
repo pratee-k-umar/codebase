@@ -1,5 +1,6 @@
 //! Application state and screens.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -7,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText, Ui};
 
-use codebase_intel_core::Language;
+use codebase_intel_core::{cfg::FlowKind, Language, Span, Symbol, SymbolKind};
 
-use crate::block::{BlockDiagram, BlockView};
+use crate::flow::FlowView;
 use crate::graph::{kind_tag, language_color, Graph, GraphView, ScopeMode};
 use crate::repo;
 use crate::scan::{self, ScanOutcome, ScanUpdate};
@@ -36,6 +37,13 @@ enum Screen {
     Graph,
 }
 
+/// Source of a symbol, shown when it is clicked in the graph.
+struct Preview {
+    title: String,
+    code: String,
+    line: usize,
+}
+
 pub struct App {
     screen: Screen,
     settings: Settings,
@@ -58,10 +66,15 @@ pub struct App {
     error: Option<String>,
 
     view: Option<GraphView>,
-    blocks: Option<BlockView>,
-    blocks_dirty: bool,
+    flow: Option<FlowView>,
+    flow_symbol: Option<Symbol>,
+    flow_error: Option<String>,
+    functions: Vec<(Symbol, String)>,
+    functions_dirty: bool,
     tab: ResultsTab,
     scope_search: String,
+    function_search: String,
+    preview: Option<(usize, Preview)>,
     toast: Option<(String, Instant)>,
 }
 
@@ -103,10 +116,15 @@ impl App {
             outcome: None,
             error: None,
             view: None,
-            blocks: None,
-            blocks_dirty: true,
+            flow: None,
+            flow_symbol: None,
+            flow_error: None,
+            functions: Vec::new(),
+            functions_dirty: true,
             tab: ResultsTab::Graph,
             scope_search: String::new(),
+            function_search: String::new(),
+            preview: None,
             toast: None,
         }
     }
@@ -190,8 +208,11 @@ impl App {
                             Instant::now(),
                         ));
                         self.view = Some(GraphView::new(Graph::build(&outcome.result)));
-                        self.blocks = None;
-                        self.blocks_dirty = true;
+                        self.flow = None;
+                        self.flow_symbol = None;
+                        self.flow_error = None;
+                        self.functions.clear();
+                        self.functions_dirty = true;
                         self.tab = ResultsTab::Graph;
                         self.outcome = Some(*outcome);
                         self.screen = Screen::Graph;
@@ -610,13 +631,13 @@ impl App {
                         }
                     }
                     ResultsTab::Blocks => {
-                        if let Some(blocks) = &mut self.blocks {
+                        if let Some(flow) = &mut self.flow {
                             if ui.button("Fit").clicked() {
-                                blocks.fit_requested = true;
+                                flow.fit_requested = true;
                             }
                             if ui.button("Re-layout").clicked() {
-                                blocks.diagram.layout();
-                                blocks.fit_requested = true;
+                                flow.relayout();
+                                flow.fit_requested = true;
                             }
                         }
                     }
@@ -660,14 +681,20 @@ impl App {
                     }
                 }
                 ResultsTab::Blocks => {
-                    self.ensure_blocks();
-                    if let Some(blocks) = &mut self.blocks {
-                        blocks.ui(ui);
-                        if let Some(id) = blocks.selected {
-                            if let Some(view) = &mut self.view {
-                                view.selected = Some(id);
-                            }
-                        }
+                    self.ensure_default_flow();
+                    if let Some(flow) = &mut self.flow {
+                        flow.ui(ui);
+                    } else if let Some(error) = &self.flow_error {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(RichText::new(error).color(DANGER));
+                        });
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(
+                                RichText::new("Pick a function in the left panel.")
+                                    .color(MUTED),
+                            );
+                        });
                     }
                 }
             }
@@ -678,28 +705,167 @@ impl App {
         }
     }
 
-    /// Rebuild the block diagram when the scope or the analysis changed.
-    fn ensure_blocks(&mut self) {
-        if !self.blocks_dirty && self.blocks.is_some() {
+    /// Recompute the list of functions available in the current scope.
+    fn ensure_functions(&mut self) {
+        if !self.functions_dirty {
             return;
         }
+
         let Some(outcome) = &self.outcome else {
+            self.functions.clear();
+            self.functions_dirty = false;
             return;
         };
 
-        let visible = self.view.as_ref().and_then(|view| view.visible_ids());
-        let entry = self
-            .view
-            .as_ref()
-            .map(|view| view.graph.entry_points.clone())
-            .unwrap_or_default();
+        let visible_paths: Option<HashSet<PathBuf>> = self.view.as_ref().and_then(|view| {
+            view.visible_ids().map(|ids| {
+                view.graph
+                    .nodes
+                    .iter()
+                    .filter(|node| ids.contains(&node.id))
+                    .map(|node| codebase_intel_core::resolve::normalize(&node.path))
+                    .collect()
+            })
+        });
 
-        let diagram = BlockDiagram::build(&outcome.result, visible.as_ref(), &entry);
-        self.blocks = Some(BlockView::new(diagram));
-        self.blocks_dirty = false;
+        let mut functions: Vec<(Symbol, String)> = outcome
+            .result
+            .symbols
+            .iter()
+            .filter(|symbol| matches!(symbol.kind, SymbolKind::Function | SymbolKind::Method))
+            .filter(|symbol| match &visible_paths {
+                Some(paths) => paths.contains(&codebase_intel_core::resolve::normalize(&symbol.file)),
+                None => true,
+            })
+            .map(|symbol| {
+                let file = symbol
+                    .file
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (symbol.clone(), format!("{file}:{}  {}", symbol.span.start.line, symbol.name))
+            })
+            .collect();
+
+        functions.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        self.functions = functions;
+        self.functions_dirty = false;
     }
 
+    /// Open a flow diagram the first time the tab is shown, preferring an entry
+    /// point's first function.
+    fn ensure_default_flow(&mut self) {
+        if self.flow.is_some() {
+            return;
+        }
+        if self.flow_symbol.is_some() && self.flow_error.is_some() {
+            return;
+        }
+
+        if self.flow_error.is_none() && self.flow_symbol.is_none() {
+            self.ensure_functions();
+        }
+
+        let preferred = self
+            .view
+            .as_ref()
+            .and_then(|view| view.graph.entry_points.first().copied());
+
+        let chosen = preferred
+            .and_then(|id| {
+                let node = self.view.as_ref()?.graph.node(id)?;
+                let path = codebase_intel_core::resolve::normalize(&node.path);
+                self.functions
+                    .iter()
+                    .find(|(symbol, _)| {
+                        codebase_intel_core::resolve::normalize(&symbol.file) == path
+                    })
+                    .map(|(symbol, _)| symbol.clone())
+            })
+            .or_else(|| self.functions.first().map(|(symbol, _)| symbol.clone()));
+
+        if let Some(symbol) = chosen {
+            self.load_flow(symbol);
+        }
+    }
+
+    fn load_flow(&mut self, symbol: Symbol) {
+        self.flow_error = None;
+        self.flow = None;
+
+        match codebase_intel_core::cfg::analyze_function(&symbol.file, &symbol) {
+            Ok(Some(graph)) => self.flow = Some(FlowView::new(graph)),
+            Ok(None) => {
+                self.flow_error = Some(format!(
+                    "Could not find {} in {}.",
+                    symbol.name,
+                    symbol.file.display()
+                ))
+            }
+            Err(error) => self.flow_error = Some(error.to_string()),
+        }
+
+        self.flow_symbol = Some(symbol);
+    }
+
+    /// Left panel while the block diagram tab is active: pick a function.
+    fn function_panel(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Functions").strong().size(14.0));
+        ui.add(
+            egui::TextEdit::singleline(&mut self.function_search)
+                .hint_text("Find a function...")
+                .desired_width(f32::INFINITY),
+        );
+
+        self.ensure_functions();
+        let needle = self.function_search.trim().to_ascii_lowercase();
+
+        let mut chosen: Option<Symbol> = None;
+        let selected_name = self.flow_symbol.as_ref().map(|symbol| symbol.id.clone());
+
+        let matches: Vec<usize> = self
+            .functions
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, label))| needle.is_empty() || label.to_ascii_lowercase().contains(&needle))
+            .map(|(index, _)| index)
+            .collect();
+
+        let height = (ui.available_height() - 20.0).max(120.0);
+        egui::ScrollArea::vertical()
+            .id_salt("functions")
+            .max_height(height)
+            .show_rows(ui, 18.0, matches.len(), |ui, range| {
+                for position in range {
+                    let index = matches[position];
+                    let (symbol, label) = &self.functions[index];
+                    let active = selected_name.as_ref() == Some(&symbol.id);
+                    if ui.selectable_label(active, RichText::new(label).size(11.0)).clicked() {
+                        chosen = Some(symbol.clone());
+                    }
+                }
+            });
+
+        if let Some(symbol) = chosen {
+            self.load_flow(symbol);
+        }
+
+        if self.functions.is_empty() {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("No functions in scope. Tick files on the Graph tab first.")
+                    .color(MUTED)
+                    .size(11.0),
+            );
+        }
+    }
     fn scope_panel(&mut self, ui: &mut Ui) {
+        if self.tab == ResultsTab::Blocks {
+            self.function_panel(ui);
+            return;
+        }
+
         ui.add_space(6.0);
         ui.label(RichText::new("Scope").strong().size(14.0));
 
@@ -852,10 +1018,15 @@ impl App {
         }
 
         if changed {
-            self.blocks_dirty = true;
+            self.functions_dirty = true;
         }
     }
     fn details_panel(&mut self, ui: &mut Ui) {
+        if self.tab == ResultsTab::Blocks {
+            self.flow_details(ui);
+            return;
+        }
+
         ui.add_space(6.0);
 
         let selected = self.view.as_ref().and_then(|view| view.selected);
@@ -894,7 +1065,7 @@ impl App {
             })
             .collect();
 
-        let symbols: Vec<(String, &'static str, usize)> = self
+        let symbols: Vec<(String, &'static str, usize, Span)> = self
             .outcome
             .as_ref()
             .map(|outcome| {
@@ -909,6 +1080,7 @@ impl App {
                             symbol.name.clone(),
                             kind_tag(symbol.kind),
                             symbol.span.start.line,
+                            symbol.span,
                         )
                     })
                     .collect()
@@ -941,11 +1113,13 @@ impl App {
         ui.separator();
 
         ui.label(RichText::new(format!("Symbols ({total_symbols})")).strong());
+        let mut requested: Option<(String, usize, Span)> = None;
+
         egui::ScrollArea::vertical()
             .id_salt("symbols")
             .max_height(220.0)
             .show(ui, |ui| {
-                for (name, tag, line) in &symbols {
+                for (name, tag, line, span) in &symbols {
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(*tag)
@@ -953,7 +1127,13 @@ impl App {
                                 .size(10.0)
                                 .color(MUTED),
                         );
-                        ui.label(RichText::new(name).size(12.5));
+                        if ui
+                            .selectable_label(false, RichText::new(name).size(12.5))
+                            .on_hover_text("Show source")
+                            .clicked()
+                        {
+                            requested = Some((name.clone(), *line, *span));
+                        }
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
@@ -966,6 +1146,44 @@ impl App {
                     ui.label(RichText::new("No symbols in this file.").color(MUTED).size(12.0));
                 }
             });
+
+        if let Some((name, line, span)) = requested {
+            if let Ok(source) = std::fs::read_to_string(&path) {
+                if let Some(code) = source.get(span.start.offset..span.end.offset) {
+                    self.preview = Some((
+                        id,
+                        Preview {
+                            title: name,
+                            code: code.trim().to_string(),
+                            line,
+                        },
+                    ));
+                }
+            }
+        }
+
+        if let Some((preview_for, preview)) = &self.preview {
+            if *preview_for == id && !preview.code.is_empty() {
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(
+                    RichText::new(format!("{}  :{}", preview.title, preview.line))
+                        .strong()
+                        .size(12.0),
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("preview")
+                    .max_height(240.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&preview.code).monospace().size(10.5),
+                            )
+                            .wrap(),
+                        );
+                    });
+            }
+        }
 
         ui.add_space(8.0);
         ui.separator();
@@ -1024,6 +1242,88 @@ impl App {
         }
     }
 
+    fn flow_details(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+
+        let Some(symbol) = self.flow_symbol.clone() else {
+            ui.label(
+                RichText::new("Pick a function to see its control flow.")
+                    .color(MUTED)
+                    .size(12.0),
+            );
+            return;
+        };
+
+        ui.label(RichText::new(&symbol.name).strong().size(16.0));
+        ui.label(
+            RichText::new(symbol.file.display().to_string())
+                .color(MUTED)
+                .size(10.5),
+        );
+        ui.add_space(8.0);
+
+        let selected = self.flow.as_ref().and_then(|flow| flow.selected);
+        let Some(id) = selected else {
+            ui.label(
+                RichText::new("Click a block to see its code.")
+                    .color(MUTED)
+                    .size(12.0),
+            );
+            ui.add_space(10.0);
+            let blocks = self
+                .flow
+                .as_ref()
+                .map(|flow| flow.graph.nodes.len())
+                .unwrap_or(0);
+            let edges = self
+                .flow
+                .as_ref()
+                .map(|flow| flow.graph.edges.len())
+                .unwrap_or(0);
+            ui.label(
+                RichText::new(format!("{blocks} blocks, {edges} transitions"))
+                    .color(MUTED)
+                    .size(11.0),
+            );
+            return;
+        };
+
+        let Some(flow) = &self.flow else { return };
+        let node = &flow.graph.nodes[id];
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(flow_kind_name(node.kind))
+                    .color(flow_kind_color(node.kind))
+                    .size(11.0),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "lines {}-{}",
+                    node.span.start.line, node.span.end.line
+                ))
+                .color(MUTED)
+                .size(10.5),
+            );
+        });
+
+        ui.add_space(6.0);
+        ui.separator();
+
+        let code = if node.detail.trim().is_empty() {
+            node.label.clone()
+        } else {
+            node.detail.clone()
+        };
+
+        egui::ScrollArea::vertical()
+            .id_salt("flow_code")
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(code).monospace().size(11.0)).wrap(),
+                );
+            });
+    }
     fn summary_panel(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Analysis").strong().size(16.0));
         ui.add_space(6.0);
@@ -1257,6 +1557,33 @@ fn kv(ui: &mut Ui, label: &str, value: usize) {
             ui.label(RichText::new(value.to_string()).size(11.5));
         });
     });
+}
+
+fn flow_kind_name(kind: FlowKind) -> &'static str {
+    match kind {
+        FlowKind::Start => "start",
+        FlowKind::End => "end",
+        FlowKind::Action => "action",
+        FlowKind::Decision => "decision",
+        FlowKind::Loop => "loop",
+        FlowKind::Return => "return",
+        FlowKind::Throw => "throw",
+        FlowKind::Try => "try",
+        FlowKind::Catch => "catch",
+    }
+}
+
+fn flow_kind_color(kind: FlowKind) -> Color32 {
+    match kind {
+        FlowKind::Start => SUCCESS,
+        FlowKind::End => DANGER,
+        FlowKind::Decision => Color32::from_rgb(214, 176, 92),
+        FlowKind::Loop => Color32::from_rgb(150, 146, 214),
+        FlowKind::Return => Color32::from_rgb(190, 130, 160),
+        FlowKind::Throw => DANGER,
+        FlowKind::Try | FlowKind::Catch => Color32::from_rgb(96, 168, 182),
+        FlowKind::Action => MUTED,
+    }
 }
 
 fn language_label(language: Language) -> &'static str {
