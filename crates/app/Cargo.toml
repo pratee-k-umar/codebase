@@ -1,0 +1,22 @@
+[package]
+name = "codebase-intel-app"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop app for codebase intelligence"
+default-run = "codebase-intel"
+
+[[bin]]
+name = "codebase-intel"
+path = "src/main.rs"
+
+[dependencies]
+codebase-intel-core = { path = "../core" }
+eframe = { workspace = true }
+egui = { workspace = true }
+rfd = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+
+[dev-dependencies]
+tempfile = { workspace = true }

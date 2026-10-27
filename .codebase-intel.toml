@@ -1,0 +1,69 @@
+# Codebase Intelligence Engine Configuration
+# Place this file in your project root as .codebase-intel.toml
+
+# File inclusion patterns (glob)
+include = ["**/*"]
+
+# File exclusion patterns (glob)
+exclude = [
+  "**/node_modules/**",
+  "**/target/**",
+  "**/.git/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/*.min.js",
+  "**/*.d.ts",
+  "**/__pycache__/**",
+  "**/.venv/**",
+  "**/venv/**",
+  "**/.next/**",
+  "**/.nuxt/**",
+  "**/vendor/**",
+]
+
+# Language configuration
+# Enable/disable specific languages
+# languages = ["typescript", "python", "go", "rust"]
+
+[parsers.typescript]
+use_project_references = true
+skip_lib_check = true
+max_file_size_mb = 10
+
+[parsers.python]
+follow_imports = true
+infer_types = false
+max_file_size_mb = 10
+
+[parsers.go]
+parse_tests = false
+cgo_enabled = false
+max_file_size_mb = 10
+
+[parsers.rust]
+edition = "2021"
+features = []
+max_file_size_mb = 10
+
+[analysis]
+# Enable/disable analysis features
+resolve_types = true
+build_call_graph = true
+detect_apis = true
+detect_database = true
+compute_metrics = true
+max_call_graph_depth = 10
+follow_dynamic_imports = false
+
+[output]
+# Output format: json, yaml, summary, mermaid, graphml, dot, csv
+format = "summary"
+include_source_snippets = true
+max_snippet_length = 200
+graph_format = "graphml"
+
+[cache]
+enabled = true
+# directory = "/path/to/cache"  # defaults to system temp
+max_size_mb = 500
+ttl_days = 30

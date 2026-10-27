@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/app",
+]
+
+[workspace.dependencies]
+# Core
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "1.0"
+indexmap = "2.0"
+walkdir = "2.0"
+ignore = "0.4"
+rayon = "1.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+glob = "0.3"
+
+# Desktop UI
+eframe = "0.31"
+egui = "0.31"
+rfd = "0.15"
+
+# Parsing
+tree-sitter = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-rust = "0.23"
+
+# Graph & Export
+petgraph = { version = "0.6", features = ["serde", "graphmap"] }
+
+# Config
+toml = "0.8"
+config = "0.14"
+
+# Testing
+tempfile = "3.0"
+
+[workspace.lints.rust]
+unused_crate_dependencies = "warn"
+unused_imports = "warn"
+dead_code = "allow"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
